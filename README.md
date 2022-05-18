@@ -41,7 +41,7 @@ Within our classification models, KNN on average performed the worst. The scores
 recall at 0.4926. With such a low recall score, this model had the worst F1 score. I did expect random forest to perform better than decision trees, since random forest aggregates many decision trees. This hypothesis proved
 correct, as the random forest model outperformed the decision tree model in all categories except precision.
 
-![Figure 3 - Classification Model Results Table](https://user-images.githubusercontent.com/105803833/169145963-93ebbb78-946a-4ca2-8cda-75257b77c318.JPG)
+![Figure 3 - Classification Model Results Chart](https://user-images.githubusercontent.com/105803833/169147506-e7fadeef-e47f-41bc-8f76-916b6d965a82.JPG)
 
 ![Figure 4 - Classification Model Results Table](https://user-images.githubusercontent.com/105803833/169145998-e47a884f-e36a-4b91-85cd-d974f082ddf3.JPG)
 
