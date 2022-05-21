@@ -1,0 +1,284 @@
+---
+title: "Math 656 Final"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(foreign)
+library(corrplot)
+library(kernlab)
+library(caret)
+library(olsrr)
+library(MLmetrics)
+library(randomForest)
+library(party)
+library(pROC)
+```
+
+# Introduction
+
+In this RMarkdown, we begin with defining our question. We sought to understand the question "are parental characteristics a good indicator of student's performance in math?" We attempted to predict a student's score in math given the answers about their parents' education, involvement, and language. 
+
+# Data Preprocessing
+We need the questionnaire information to gather data on parents and test scores. Rather than search through all 3,000 questions in the data set, we simply pulled the column descriptions and searched whether they contained the word "mother" or "father".
+
+```{r }
+QQQ <- read.spss(file = "C:/Users/cdoyle/Downloads/USA_CY07_MSU_STU_QQQ.sav", to.data.frame = TRUE, use.value.labels = FALSE) 
+col_descript <- attributes(QQQ)$variable.labels %>% as.data.frame() #get all the column descriptions
+col_descript <- col_descript %>% filter(str_detect(col_descript$.,"mother|father")) #get all column descriptions that have mother and father
+cols_to_select <- rownames(col_descript) #grab all column names that have the column description of mother and father
+
+```
+
+We brought in only the math score and the columns that mentioned mother and father. We then renamed the questions so we could more easily understand the column's data at first glance. 
+
+After going through the data in the columns, we realized the numbers in these fields were actually multiple choice, or yes/no answers. The numbers should in fact be factors. When modeling, we should treat these values as discrete factors rather than continuous numbers. 
+
+Some of these questions are towards the back of the questionnaire and had many NAs. We had to remove columns that had all NA values if we wanted our model to run.
+
+```{r, warning=F }
+QQQ <- QQQ%>% select(PV1MATH, all_of(cols_to_select)) #select only the math score and the parent columns
+#rename the columns to something more useful
+new_names <- c("Math", "School_M", "L6M", "L5AM", "L5BM", "L4M", "School_F", "L6F", "L5AF", "L5BF", "L4F", "Usual_Lang_M", "Usual_Lang_F", "Num_Lang_M", "Num_Lang_F", "MHW", "FHW", "Talk_F", "Talk_MP", "Talk_M", "Talk_FP", "ISEI_M", "ISEI_F", "Lang_Stu_M", "Lang_Stu_F")
+colnames(QQQ) <- new_names
+
+attributes_QQQ <- map_chr(QQQ, class)
+attributes_QQQ
+# We recognize many of these questions are yes/no or multiple choice. They should not be numeric, but factors
+new_names <- new_names[2:25]
+QQQ <- QQQ %>%  mutate_each_(funs(factor(.)), new_names)
+
+summary(QQQ)
+
+#now remove the columns with only NAs
+QQQ <- QQQ %>% select(where( ~sum(!is.na(.x)) > 0 ))
+
+new_names <- colnames(QQQ[2:17])
+
+```
+
+Now that we have narrowed in on the columns we want that have data, we have to look at whether or not our varaibles are correlated with one another. We cannot compute distance metrics on factors, so we must convert them back to numberic to gather this information.
+
+```{r, warning=FALSE }
+# to see correlation, we must covert it back to numeric
+QQQ <- QQQ %>%  mutate_each_(funs(as.numeric(.)), new_names)
+cor_mat <- cor(QQQ, use="pairwise.complete.obs")
+
+corrplot(cor_mat)
+```
+
+We note that usual language the mother and father speak with the children (Usual_Lang_M, Usual_Lang_F) is highly correlated with the language the mother and father speak with other students at school (Lang_Stu_M, Lang_Stu_F). We must remove one of these columns to prevent colinearity problems. 
+
+The same goes for the usual language spoken at home for both the mother and father, Usual_Lang_F is highly correlated with Ususal_Lang_M.
+
+We could simply drop Usual_Lang_F and Lang_Stu_M, that would solve both of our colinearity issues. However, we notice that Lang_Stu_F also has many NAs. Over half of our data would be excluded from analysis if we left in this column, so we drop all three columns. 
+
+```{r }
+
+new_names <- c("Usual_Lang_M", "Usual_Lang_F", "Lang_Stu_M", "Lang_Stu_F")
+QQQ %>% select(all_of(new_names)) %>% summary()
+
+#We would lose the least amount of data by dropping Usual_Lang_F and Lang_Stu_M, however, we'd have over half our data lost if we included the langauge the father speaks to students due to the number of NAs
+
+QQQ <- QQQ %>% select(-"Usual_Lang_F", -"Lang_Stu_M", -"Lang_Stu_F")
+
+cor_mat <- cor(QQQ, use="pairwise.complete.obs")
+
+corrplot(cor_mat)
+
+```
+
+Now that we are finished with our linearity check, we can convert all our columns back to factors and get rid of all rows that have NA values in our dataset. 
+
+```{r }
+new_names <- colnames(QQQ)[2:14]
+QQQ <- QQQ %>%  mutate_each_(funs(factor(.)), new_names)
+
+summary(QQQ)
+no_NA_QQQ <- na.omit(QQQ)
+dist_QQQ <- dist(no_NA_QQQ)
+
+```
+
+# Data Mining Techniques
+
+We split our data into test and train data sets, and set an index for resampling the training. We want to double check that our training and testing data sets have approximately similar distributions for student score.
+
+```{r }
+#classification algorithms - set up
+set.seed(123)
+inTrain <- createDataPartition(y = no_NA_QQQ$Math, p = .8, list = F)
+training <- no_NA_QQQ %>% slice(inTrain)
+testing <- no_NA_QQQ %>% slice(-inTrain)
+
+train_index <- createFolds(training$Math, k=10)
+
+#ensure test and train dataset are about similar
+summary(training$Math)
+summary(testing$Math)
+
+```
+
+## Support Vector Machines (Regression)
+
+Our first model we chose is Support Vector Machines (SVM). At first, we try SVM regression to predict the exact score of the student based on the answers about the parents. We plot our results, and hope we get a decent OLS regression line, as well as a good $R^2$ value.
+
+```{r warning=FALSE}
+#SVM Regression
+
+svmFit <- training %>% train(Math ~.,
+                             method = "svmLinear",
+                             data = .,
+                             tuneLength = 5,
+                             trControl = trainControl(method = "cv", indexOut = train_index))
+
+resultsSVM <- predict(svmFit, testing)
+results_plot <- cbind(actual=testing$Math, predictions=resultsSVM) %>% as.data.frame()
+
+ggplot(results_plot, mapping = aes(actual, predictions))+
+  geom_point()+
+  geom_abline(color="blue")
+
+mse = MSE(resultsSVM, testing$Math)
+mae = MAE(resultsSVM, testing$Math)
+rmse = RMSE( resultsSVM, testing$Math)
+r2 = R2( resultsSVM, testing$Math, form = "traditional")
+ 
+cat(" MAE:", mae, "\n", "MSE:", mse, "\n", 
+     "RMSE:", rmse, "\n", "R-squared:", r2)
+
+```
+
+We did not get a good prediction of a student's score based on the SVM regression model on the parents' attributes. We decided to simplify the problem, and use the same data mining technique, SVM. We turned our regression question into a classification problem. 
+
+We now want to predict whether a student will perform above or below average based on the characteristics of their parents. We create a new column, called "classification" which tags each row as either above the mean math score ("High") or below the mean math score ("Low"). We replace our math score column with this new column.
+
+Following the same steps as above, we split our testing and training into different data sets, and create a training index for resampling. We test to see that we have an approximately proprotionate number of students above and below the average in each data set.
+
+Now we run SVM classification to predict whether or not a student had a high or low math score based on their parents' attributes.
+
+## Support Vector Machines (Classification)
+
+```{r warning=FALSE}
+## SVM classification
+
+set.seed(123)
+classification <- if_else(no_NA_QQQ$Math > mean(no_NA_QQQ$Math), "High", "Low") %>% as.factor()
+QQQ_class <- cbind(no_NA_QQQ, classification) %>% as.data.frame() %>% select(-Math)
+
+inTrain <- createDataPartition(y = QQQ_class$classification, p = .8, list = F)
+training <- QQQ_class %>% slice(inTrain)
+testing <- QQQ_class %>% slice(-inTrain)
+
+train_index <- createFolds(training$classification, k=10)
+
+#ensure test and train dataset are about similar
+training %>% group_by(classification) %>% summarise(train_count=n())
+testing %>% group_by(classification) %>% summarise(train_count=n())
+
+svmFit <- training %>% train(classification ~.,
+                             method = "svmLinear",
+                             data = .,
+                             tuneLength = 5,
+                             trControl = trainControl(method = "cv", indexOut = train_index))
+
+resultsSVM <- predict(svmFit, testing)
+confusionMatrix(resultsSVM, reference = testing$classification, mode = "prec_recall")
+
+```
+
+This accuracy is much better than the $R^2$ value associated with our SVM regression. Our question seems better suited to classification than regression. We will try running other models to see if we can get a better  result.
+
+### K-Nearest Neighbors (Classification)
+
+```{r warning=FALSE}
+set.seed(123)
+
+knnFit <- training %>% train(classification ~ ., 
+  method = "knn", 
+  data = ., 
+  #preProcess = "scale", 
+    tuneLength = 5, 
+  tuneGrid=data.frame(k = 1:10), 
+    trControl = trainControl(method = "cv", indexOut = train_index)) 
+
+KNNResults <- predict(knnFit, testing)
+confusionMatrix(KNNResults, reference = testing$classification, mode = "prec_recall")
+
+```
+
+## Decision Tree (Classification)
+
+```{r }
+DTFit <- training %>% train(classification ~.,
+                             method = "ctree",
+                             data = .,
+                             tuneLength = 5,
+                             trControl = trainControl(method = "cv", indexOut = train_index))
+DFResults <- predict(DTFit, testing)
+confusionMatrix(DFResults, reference = testing$classification, mode = "prec_recall")
+```
+
+## Random Forest (Classification)
+
+```{r }
+RFFit <- training %>% train(classification ~.,
+                             method = "rf",
+                             data = .,
+                             tuneLength = 5,
+                             trControl = trainControl(method = "cv", indexOut = train_index))
+
+resultsRF <- predict(RFFit, testing)
+confusionMatrix(resultsRF, reference = testing$classification, mode = "prec_recall")
+```
+
+# Resampling
+
+```{r}
+
+resampling <- resamples(list(SVM=svmFit, KNN = knnFit, DecisionTree = DTFit, RandomForest=RFFit))
+summary(resampling)
+
+```
+
+# Evaluation 
+
+
+```{r }
+roc(as.numeric(testing$classification), as.numeric(resultsSVM), plot=T, legacy.axes=T)
+```
+
+
+```{r }
+roc(as.numeric(testing$classification), as.numeric(KNNResults), plot=T, legacy.axes=T)
+```
+
+
+```{r }
+roc(as.numeric(testing$classification), as.numeric(DFResults), plot=T, legacy.axes=T)
+```
+
+
+```{r }
+roc(as.numeric(testing$classification), as.numeric(resultsRF), plot=T, legacy.axes=T)
+```
+
+
+```{r }
+SVM_ROC <- roc(as.numeric(testing$classification), as.numeric(resultsSVM))
+KNN_ROC <- roc(as.numeric(testing$classification), as.numeric(KNNResults))
+DF_ROC <- roc(as.numeric(testing$classification), as.numeric(DFResults))
+RF_ROC <- roc(as.numeric(testing$classification), as.numeric(resultsRF))
+
+plot(SVM_ROC, col = 1, legacy.axes=T)
+plot(KNN_ROC, col = 2, add = T)
+plot(KNN_ROC, col = 3, add = T)
+plot(KNN_ROC, col = 4, add = T)
+
+
+```
+
+
+
+
